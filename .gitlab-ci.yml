@@ -1,0 +1,75 @@
+# image: docker:latest
+image: harbor.dhgateinternal.com/devops/maven:3.6.3-jdk-11
+
+services:
+  - docker:dind
+
+
+stages:
+  - build
+  - docker
+  - dhbox
+
+
+variables:
+  DOCKER_DRIVER: overlay2
+  DOCKER_TLS_CERTDIR: ""
+  DOCKER_HOST: tcp://docker:2375
+  MAVEN_OPTS: "-Dmaven.repo.local=/root/.m2/repository"
+  NAMESPACE: "dhgate"
+  APP_NAME: "tencentdemo"
+  DOCKER_BUILD_MODULE: "#docker_build_module#"
+  PUSH_MAVEN_MODULE: "#push_maven_module#"
+
+
+before_script:
+  - export BUILD_TIMESTAMP=$(date +"%Y-%m-%d %H:%M:%S")
+after_script:
+  - >
+    if [ $CI_JOB_STATUS == 'success' ]; then
+      echo $CI_JOB_URL
+    else
+      curl --location "http://g4.dhgateinternal.com/box/gitlab_ci_error_callback/" --header 'Content-Type: application/json' --data "{\"token\": \"9cea1306a59193ad9de1558f0e2805468d5decc1\",\"app_name\": \"$APP_NAME\",\"build_number\": \"$CI_PIPELINE_IID\",\"build_time\": \"$BUILD_TIMESTAMP\",\"build_branch\": \"$CI_COMMIT_REF_NAME\",\"ci_user\": \"$CI_USER\",\"ci_project_id\": \"$CI_PROJECT_ID\",\"ci_job_id\": \"$CI_JOB_ID\",\"ci_pipeline_source\": \"$CI_PIPELINE_SOURCE\"}"
+    fi
+
+docker-build-push:
+  stage: docker
+  interruptible: true
+  image:
+    name: gcr.io/kaniko-project/executor:v1.9.0-debug
+    entrypoint: [""]
+  tags:
+    - g4
+  script:
+    - echo "{\"auths\":{\"$HARBOR_REGISTRY\":{\"username\":\"${HARBOR_USERNAME}\",\"password\":\"${HARBOR_PASSWORD}\"}}}" > /kaniko/.docker/config.json
+    - /kaniko/executor
+      --snapshotMode=redo
+      --compressed-caching=false
+      --build-arg http_proxy=http://172.19.200.77:1080
+      --build-arg https_proxy=http://172.19.200.77:1080
+      --context "${CI_PROJECT_DIR}"
+      --dockerfile "${CI_PROJECT_DIR}/Dockerfile"
+      --destination "$HARBOR_REGISTRY/$NAMESPACE/$APP_NAME:$CI_PIPELINE_IID"
+  only:
+    - api
+
+
+磐石控制台可发布:
+  stage: dhbox
+  interruptible: true
+  needs: [docker-build-push]
+  dependencies: []
+  variables:
+    GIT_STRATEGY: none
+  tags:
+    - g4
+  script:
+    - |
+      if [ -z "$CI_USER" ]; then
+          CI_USER=$GITLAB_USER_NAME 
+      fi
+    - echo "构建发起人：$CI_USER"
+    - curl -H "Authorization:Token 9cea1306a59193ad9de1558f0e2805468d5decc1" -X POST -F "app_name=$APP_NAME" -F "build_number=$CI_PIPELINE_IID" -F "build_time=$BUILD_TIMESTAMP" -F "build_branch=$CI_COMMIT_REF_NAME" -F 'auto_code_review=YES' -F "git_commit_hash=$CI_COMMIT_SHA" -F "ci_user=$CI_USER" -F "ci_pipeline_id=$CI_PIPELINE_ID" -F "ci_pipeline_source=$CI_PIPELINE_SOURCE" http://g4.dhgateinternal.com/api/box/v1/app_version/
+    - curl -X POST -H "Content-Type:application/json" --data "{\"token\":\"9cea1306a59193ad9de1558f0e2805468d5decc1\",\"app_name\":\"$APP_NAME\",\"build_number\":\"$CI_PIPELINE_IID\",\"build_time\":\"$BUILD_TIMESTAMP\",\"build_branch\":\"$CI_COMMIT_REF_NAME\",\"ci_user\":\"$CI_USER\",\"env_code\":\"$ENV_CODE\",\"ci_project_id\":\"$CI_PROJECT_ID\",\"ci_job_id\":\"$CI_JOB_ID\",\"ci_pipeline_source\":\"$CI_PIPELINE_SOURCE\"}" http://g4.dhgateinternal.com/box/gitlab_ci_success_callback/
+  only:
+    - api
